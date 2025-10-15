@@ -2,7 +2,7 @@ import numpy as np
 import random
 import torch
 from torch.utils.data import Dataset
-
+from collections import defaultdict
 
 def robust_std(x):
     """
@@ -135,160 +135,32 @@ def create_balanced_pairs(region_segments_dict, max_dataset_size=20000, seed=42)
     return list(final_pairs), list(final_labels)
 
 
-def create_balanced_pairs_for_3stage_training(data_dict, stage='inter_subject', max_dataset_size=20000, seed=42):
+def make_balanced_reference(embeddings, labels, per_class=None, seed=42):
     """
-    Create a balanced dataset of similar and dissimilar pairs for contrastive training.
-    
-    Args:
-        data_dict (dict): Dictionary of segments, structure depends on stage.
-        stage (str): One of 'intra_session', 'intra_subject', 'inter_subject'.
-        max_dataset_size (int): Max total number of training pairs.
-        seed (int): Random seed for reproducibility.
-    
-    Returns:
-        (list of tuple, list of int): List of (segment1, segment2) pairs and labels (0=similar, 1=dissimilar).
+    Returns (ref_emb, ref_labels) where each class contributes the same number of samples.
+    If per_class is None, we use the minimum class count.
     """
+    # Ensure numpy array for easy indexing
+    emb = np.asarray(embeddings)
 
-    random.seed(seed)
-    np.random.seed(seed)
+    by_cls = defaultdict(list)
+    for i, y in enumerate(labels):
+        by_cls[y].append(i)
 
-    similar_pairs, dissimilar_pairs = [], []
+    if per_class is None:
+        per_class = min(len(v) for v in by_cls.values())
 
-    if stage == 'inter_subject':
-        # Format: dict[region] = list of segments
-        region_names = list(data_dict.keys())
-        num_regions = len(region_names)
-        per_region_quota = max_dataset_size // 2 // num_regions
+    rng = np.random.default_rng(seed)
+    sel_idx = []
+    for y, idxs in by_cls.items():
+        take = min(per_class, len(idxs))
+        sel = rng.choice(idxs, size=take, replace=False)
+        sel_idx.extend(sel.tolist())
 
-        # Similar pairs
-        for region in region_names:
-            segments = data_dict[region]
-            if len(segments) < 2:
-                continue
-            indices = list(range(len(segments)))
-            random.shuffle(indices)
-            seen = set()
-            while len(similar_pairs) < per_region_quota * (region_names.index(region) + 1):
-                i, j = random.sample(indices, 2)
-                if (i, j) not in seen and (j, i) not in seen:
-                    similar_pairs.append((segments[i], segments[j]))
-                    seen.add((i, j))
-                if len(seen) > len(indices) * (len(indices) - 1) // 2:
-                    break
-
-        # Dissimilar pairs
-        per_combo_quota = max_dataset_size // 2 // (num_regions * (num_regions - 1) // 2)
-        seen = set()
-        for i, r1 in enumerate(region_names):
-            for r2 in region_names[i+1:]:
-                s1 = data_dict[r1]
-                s2 = data_dict[r2]
-                count = 0
-                while count < per_combo_quota:
-                    a = random.choice(s1)
-                    b = random.choice(s2)
-                    key = (id(a), id(b))
-                    if key not in seen:
-                        dissimilar_pairs.append((a, b))
-                        seen.add(key)
-                        count += 1
-
-    elif stage == 'intra_subject':
-        # Format: dict[subject][region] = list of segments
-        for subj, region_dict in data_dict.items():
-            region_names = list(region_dict.keys())
-            if len(region_names) < 2:
-                continue
-
-            # Similar
-            for region in region_names:
-                segments = region_dict[region]
-                if len(segments) < 2:
-                    continue
-                indices = list(range(len(segments)))
-                random.shuffle(indices)
-                seen = set()
-                while len(seen) < len(indices) * (len(indices) - 1) // 2:
-                    i, j = random.sample(indices, 2)
-                    if (i, j) not in seen and (j, i) not in seen:
-                        similar_pairs.append((segments[i], segments[j]))
-                        seen.add((i, j))
-                    if len(similar_pairs) > max_dataset_size // 2:
-                        break
-
-            # Dissimilar
-            for i, r1 in enumerate(region_names):
-                for r2 in region_names[i+1:]:
-                    s1 = region_dict[r1]
-                    s2 = region_dict[r2]
-                    count = 0
-                    while len(dissimilar_pairs) < max_dataset_size // 2:  # conservative
-                        a = random.choice(s1)
-                        b = random.choice(s2)
-                        dissimilar_pairs.append((a, b))
-                        count += 1
-
-    elif stage == 'intra_session':
-        # Format: dict[subject][session][region] = list of segments
-        for subj in data_dict:
-            count_similar = 0
-            count_dissimilar = 0
-            for sess in data_dict[subj]:
-                print(f"\nLoading {subj} {sess} segments...") 
-                region_dict = data_dict[subj][sess]
-                region_names = list(region_dict.keys())
-                if len(region_names) < 2:
-                    continue
-
-                # Similar
-                for region in region_names:
-                    segments = region_dict[region]
-                    if len(segments) < 2:
-                        continue
-                    indices = list(range(len(segments)))
-                    random.shuffle(indices)
-                    seen = set()
-                    while len(seen) < len(indices) * (len(indices) - 1) // 2 and count_similar < max_dataset_size//34:
-                        i, j = random.sample(indices, 2)
-                        if (i, j) not in seen and (j, i) not in seen:
-                            similar_pairs.append((segments[i], segments[j]))
-                            count_similar += 1
-                            seen.add((i, j))
-                        if len(similar_pairs) > max_dataset_size // 2:
-                            break
-
-                # Dissimilar
-                for i, r1 in enumerate(region_names):
-                    for r2 in region_names[i+1:]:
-                        s1 = region_dict[r1]
-                        s2 = region_dict[r2]
-                        count = 0
-                        while len(dissimilar_pairs) < max_dataset_size // 2 and count_dissimilar < max_dataset_size//34:  
-                            a = random.choice(s1)
-                            b = random.choice(s2)
-                            dissimilar_pairs.append((a, b))
-                            count += 1
-                            count_dissimilar += 1
-            print(f"added {count_similar} similar pairs and {count_dissimilar} dissimilar pairs from subject {subj}")
-
-    else:
-        raise ValueError(f"Unknown stage: {stage}")
-
-    # Final Combine & Shuffle
-    total_pairs = min(len(similar_pairs), len(dissimilar_pairs))
-    similar_pairs = similar_pairs[:total_pairs]
-    dissimilar_pairs = dissimilar_pairs[:total_pairs]
-    final_pairs = similar_pairs + dissimilar_pairs
-    final_labels = [0] * len(similar_pairs) + [1] * len(dissimilar_pairs)
-
-    combined = list(zip(final_pairs, final_labels))
-    random.shuffle(combined)
-    final_pairs, final_labels = zip(*combined)
-
-    print(f"[{stage.upper()}] Created {len(final_pairs)} total pairs "
-          f"({len(similar_pairs)} similar, {len(dissimilar_pairs)} dissimilar).")
-
-    return list(final_pairs), list(final_labels)
+    sel_idx = np.asarray(sel_idx, dtype=int)
+    ref_emb = emb[sel_idx]
+    ref_labels = [labels[i] for i in sel_idx]
+    return ref_emb, ref_labels
 
 
 class LFPDataset(Dataset):
@@ -312,3 +184,63 @@ class LFPDataset(Dataset):
         x2 = torch.tensor(x2, dtype=torch.float32).unsqueeze(0)
         label = torch.tensor(self.labels[idx], dtype=torch.float32)
         return x1, x2, label
+    
+def _augment_timeseries(x_np, jitter_std=0.05, scale_min=0.9, scale_max=1.1, time_shift_frac=0.2, mask_frac=0.05):
+    """
+    Light, physiology-friendly augmentations: scale, jitter, small circular shift, tiny time mask.
+    x_np: (T,)
+    """
+    x = x_np.copy()
+
+    # amplitude scale
+    scale = np.random.uniform(scale_min, scale_max)
+    x = x * scale
+
+    # small circular time shift
+    T = x.shape[-1]
+    max_shift = max(1, int(time_shift_frac * T))
+    if max_shift > 0:
+        s = np.random.randint(-max_shift, max_shift+1)
+        x = np.roll(x, s)
+
+    # small Gaussian jitter
+    if jitter_std > 0:
+        x = x + np.random.randn(*x.shape) * jitter_std * (np.std(x_np) + 1e-8)
+
+    # tiny contiguous mask
+    mlen = max(1, int(mask_frac * T))
+    start = np.random.randint(0, max(1, T - mlen + 1))
+    x[start:start+mlen] = 0.0
+
+    return x
+
+class SupConDataset(Dataset):
+    """
+    For each segment, returns two augmented views and a region label index.
+    region_segments_dict: { region_name: np.ndarray[num_segments, T] }
+    """
+    def __init__(self, region_segments_dict, region_order=None, transform=_augment_timeseries):
+        self.transform = transform
+        self.samples = []   # list of (segment_np, region_idx)
+        if region_order is None:
+            region_order = list(region_segments_dict.keys())
+        self.region_to_idx = {r:i for i,r in enumerate(region_order)}
+        for r in region_order:
+            segs = region_segments_dict[r]
+            for s in segs:
+                self.samples.append( (s.astype(np.float32), self.region_to_idx[r]) )
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        x, y = self.samples[idx]                   # x: (T,), y: int
+        x1 = self.transform(x)
+        x2 = self.transform(x)
+        x1 = torch.tensor(x1, dtype=torch.float32).unsqueeze(0)  # (1, T)
+        x2 = torch.tensor(x2, dtype=torch.float32).unsqueeze(0)
+        y  = torch.tensor(y, dtype=torch.long)
+        return x1, x2, y
+    
+
+
